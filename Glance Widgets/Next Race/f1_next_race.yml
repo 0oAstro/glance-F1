@@ -2,48 +2,81 @@
   title: Next Race
   cache: 5m
   url: http://${F1_API_URL}:4463/f1/next_race/
+  subrequests:
+    track-map:
+      url: http://${F1_API_URL}:4463/f1/next_map/json
+      cache: 1d
   template: |
-    <div class="flex flex-column gap-10">
-      {{ $session := index (.JSON.Array "race") 0 }}
-      <p class="size-h5">
-        {{ .JSON.String "season" }}, Round {{ .JSON.String "round" }}
-      </p>
+    {{ $session := index (.JSON.Array "race") 0 }}
+    {{ $trackMap := .Subrequest "track-map" }}
+    {{ $nextDateTime := .JSON.String "next_event.datetime" }}
+    {{ $raceDateTime := $session.String "schedule.race.datetime_rfc3339" }}
+    {{ $circuit := $session.String "circuit.circuitName" }}
+    {{ $city := $session.String "circuit.city" }}
+    {{ $country := $session.String "circuit.country" }}
 
-      <div class="margin-block-4">
-        <p class="color-highlight">{{ $session.String "raceName" }}</p>
-        <p class="color-primary">
-          <span>
-            {{ .JSON.String "next_event.session" }}
-          </span>
-          {{ $datetime := .JSON.String "next_event.datetime" }}
-          <span
-            class="color-highlight"
-            {{ parseRelativeTime "rfc3339" $datetime }}
-          ></span>
-        </p>
-        <p class="size-h5">
-          {{ .JSON.String "next_event.date" }} @  {{ .JSON.String "next_event.time" }}
-        </p>
-
-        <div style="margin-block: 1rem;">
-          <img
-            src="http://${F1_API_URL}:4463/f1/next_map/"
-            onerror="this.style.display='none'"
-            style="max-width: 100%; height: auto; border-radius: 8px;"
-          />
+    <ul class="list list-gap-14">
+      <li class="flex items-center gap-10">
+        <div class="size-h6 shrink-0" style="width: 3.2rem;">
+          <span class="color-subdue">R{{ $session.String "round" }}</span>
         </div>
+        <div class="grow min-width-0 flex flex-column gap-5">
+          <div class="flex items-center justify-between gap-6">
+            <span class="text-truncate color-highlight">{{ $session.String "raceName" }}</span>
+            <span class="shrink-0 color-subdue">{{ .JSON.String "season" }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-6 size-h6 color-subdue">
+            <span class="text-truncate">{{ $city }}, {{ $country }}</span>
+            <span class="shrink-0">{{ $session.String "laps" }} laps</span>
+          </div>
+        </div>
+      </li>
 
-        <p class="color-highlight">
-          Circuit Details
-        </p>
-        <p class="size-h6">
-          Name: {{ $session.String "circuit.circuitName" }}
-        </p>
-        <p class="size-h6">
-          Lap Record: {{ $session.String "circuit.lapRecord" }}, {{ $session.String "circuit.fastestLapDriverName" }} ({{ $session.String "circuit.fastestLapYear"}})
-        </p>
-        <p class="size-h6">
-          Length: {{ $session.String "laps" }} laps @ {{ $session.String "circuit.circuitLengthKm" }} KMs
-        </p>
-      </div>
-    </div>
+      <li class="flex items-center gap-10">
+        <div class="size-h6 shrink-0" style="width: 3.2rem;">
+          <span class="color-primary">Next</span>
+        </div>
+        <div class="grow min-width-0 flex flex-column gap-5">
+          <div class="flex items-center justify-between gap-6">
+            <span class="text-truncate">{{ .JSON.String "next_event.session" }}</span>
+            <span class="shrink-0 color-highlight" {{ parseRelativeTime "rfc3339" $nextDateTime }}></span>
+          </div>
+          <div class="size-h6 color-subdue">{{ .JSON.String "next_event.date" }} · {{ .JSON.String "next_event.time" }}</div>
+        </div>
+      </li>
+
+      <li class="flex items-center gap-10">
+        <div class="size-h6 shrink-0" style="width: 3.2rem;">
+          <span class="color-subdue">Race</span>
+        </div>
+        <div class="grow min-width-0 flex flex-column gap-5">
+          <div class="flex items-center justify-between gap-6">
+            <span class="text-truncate">Grand Prix</span>
+            <span class="shrink-0 color-subdue" {{ parseRelativeTime "rfc3339" $raceDateTime }}></span>
+          </div>
+          <div class="size-h6 color-subdue">{{ $session.String "schedule.race.date" }} · {{ $session.String "schedule.race.time" }}</div>
+        </div>
+      </li>
+
+      <li class="flex items-center gap-10">
+        <div class="size-h6 shrink-0" style="width: 3.2rem;">
+          <span class="color-subdue">Track</span>
+        </div>
+        <div class="grow min-width-0 flex flex-column gap-5">
+          <div class="flex items-center justify-between gap-6">
+            <span class="text-truncate">{{ $circuit }}</span>
+            <span class="shrink-0 color-subdue">{{ $session.String "circuit.circuitLengthKm" }} km</span>
+          </div>
+          <div class="size-h6 color-subdue">Lap record {{ $session.String "circuit.lapRecord" }} · {{ $session.String "circuit.fastestLapDriverName" }} {{ $session.String "circuit.fastestLapYear" }}</div>
+        </div>
+      </li>
+
+      {{ if eq $trackMap.Response.StatusCode 200 }}
+      <li>
+        <img
+          src="data:image/svg+xml;base64,{{ $trackMap.JSON.String "svg_base64" }}"
+          style="display: block; width: 100%; max-height: 150px; object-fit: contain; box-sizing: border-box; padding: 2px 0;"
+        />
+      </li>
+      {{ end }}
+    </ul>

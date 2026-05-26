@@ -4,16 +4,89 @@ import httpx
 from datetime import datetime, timedelta
 import hashlib
 import json
+import re
 
-from .helpers.functions import country_to_code, get_next_race_end, format_team_name
-from .helpers.global_vars import NEXT_RACE_API_URL, default_expire
-from .helpers.time_functions import MT, UTC
+from .helpers.functions import country_to_code, get_next_race_end
+from .helpers.global_vars import default_expire
+from .helpers.time_functions import MT
 
 router = APIRouter()
-    
+F1_RESULTS_URL = "https://www.formula1.com/en/results/{season}/team"
+
+
 def make_signature(results):
-    return hashlib.md5(json.dumps(results, 
-        sort_keys=True).encode()).hexdigest()
+    return hashlib.md5(json.dumps(results, sort_keys=True).encode()).hexdigest()
+
+
+def strip_tags(value: str) -> str:
+    value = re.sub(r"<[^>]+>", " ", value)
+    return " ".join(value.replace("\xa0", " ").split())
+
+
+def clean_team(team: str) -> str:
+    return {
+        "Haas F1 Team": "Haas",
+        "Red Bull Racing": "Red Bull",
+        "Racing Bulls": "RB",
+    }.get(team, team)
+
+
+async def fetch_formula1_constructors(season: int):
+    async with httpx.AsyncClient(follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+        response = await client.get(F1_RESULTS_URL.format(season=season), timeout=60)
+        response.raise_for_status()
+        html = response.text
+
+    table = re.search(r'<tbody[^>]*class="[^"]*Table-module_tbody[^>]*>(.*?)</tbody>', html, re.S)
+    if not table:
+        raise ValueError("Formula1 team standings table not found")
+
+    results = []
+    for row in re.findall(r'<tr[^>]*>(.*?)</tr>', table.group(1), re.S):
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.S)
+        if len(cells) < 3:
+            continue
+        position = strip_tags(cells[0])
+        team = clean_team(strip_tags(cells[1]))
+        points = strip_tags(cells[2])
+        results.append({
+            "team": team,
+            "position": int(position) if position.isdigit() else position,
+            "points": int(points) if points.isdigit() else points,
+            "wins": 0,
+            "country": "",
+            "flag": country_to_code(""),
+            "wiki": "",
+        })
+    if not results:
+        raise ValueError("Formula1 team standings table was empty")
+    return results
+
+
+async def fetch_f1api_constructors():
+    async with httpx.AsyncClient() as client:
+        response = await client.get("https://f1api.dev/api/current/constructors-championship", timeout=60)
+        response.raise_for_status()
+        data = response.json()
+
+    results = []
+    for entry in data.get("constructors_championship", []):
+        team = entry.get("team", {})
+        team_name = team.get("teamName") or ""
+        for word in ["Formula 1", "F1", "Racing", "Team", "Scuderia"]:
+            team_name = team_name.replace(word, "").strip()
+        country = team.get("country", "")
+        results.append({
+            "team": team_name,
+            "position": entry.get("position"),
+            "points": entry.get("points"),
+            "wins": entry.get("wins") or 0,
+            "country": country,
+            "flag": country_to_code(country),
+            "wiki": team.get("url"),
+        })
+    return data.get("season"), results
+
 
 @router.get("/", summary="Fetch current constructors championship")
 async def get_constructors_championship():
@@ -24,81 +97,33 @@ async def get_constructors_championship():
     if cached:
         return cached
 
-    async with httpx.AsyncClient() as client:
-        response = await client.get("https://f1api.dev/api/current/constructors-championship", timeout=60)
-        if response.status_code != 200:
-            return {"error": "Failed to fetch data"}
+    season = datetime.now(MT).year
+    source = "formula1.com"
+    try:
+        results = await fetch_formula1_constructors(season)
+    except Exception:
+        source = "f1api.dev-fallback"
+        season, results = await fetch_f1api_constructors()
 
-        data = response.json()
-
-    constructors = data.get("constructors_championship", [])
-    results = []
-    for entry in constructors:
-
-        # Clean up team names and get rid of standard boilerplate slop
-        team = entry.get("team", {})
-        team_name = team.get("teamName")
-        for word in ['Formula 1', 'F1', 'Racing', 'Team', 'Scuderia']:
-            team_name = team_name.replace(word, "").strip()
-        country = team.get("country", "")
-        results.append({
-            "team": team_name,
-            "position": entry.get("position"),
-            "points": entry.get("points"),
-            "wins": entry.get("wins") or 0,
-            "country": country,
-            "flag": country_to_code(country),
-            "wiki": team.get("url")
-        })
-
-    # Cache until event ends or 1 hour (in case f1/last is down or something
     now = datetime.now(MT)
     race_dt = await get_next_race_end()
-
     expire = default_expire
     expiry_dt = now + timedelta(seconds=default_expire)
-
-    cached = await cache.get(cache_key)
-    old_signature = cached.get("result_signature") if cached else None
-    new_signature = make_signature(results)
     if race_dt:
         if race_dt > now:
-            expire = max(60, int((race_dt - now).total_seconds()))
-            expiry_dt = race_dt
+            expire = min(default_expire, max(60, int((race_dt - now).total_seconds())))
+            expiry_dt = now + timedelta(seconds=expire)
         elif now < race_dt + timedelta(seconds=default_expire):
             expiry_dt = race_dt + timedelta(seconds=default_expire)
-            expire = int((expiry_dt - now).total_seconds())
-        else:
-            expire = default_expire
-            expiry_dt = now + timedelta(seconds=default_expire)
-
-            async with httpx.AsyncClient() as client:
-                results_response = await client.get("https://f1api.dev/api/current/constructors-championship", timeout=60)
-                next_response = await client.get(NEXT_RACE_API_URL)
-
-            fresh_results = results_response.json()
-            data = next_response.json()
-            
-            new_signature = make_signature(fresh_results)
-
-            if old_signature != new_signature:
-                new_next_dt = data.get("next_event", {}).get("datetime")
-
-                if new_next_dt:
-                    next_race_dt = datetime.fromisoformat(new_next_dt)
-
-                    if next_race_dt.tzinfo is None:
-                        next_race_dt = UTC.localize(next_race_dt)
-                    next_race_dt = next_race_dt.astimezone(MT)
-
-                    expire = int((next_race_dt - now).total_seconds())
-                    expiry_dt = next_race_dt
+            expire = max(60, int((expiry_dt - now).total_seconds()))
 
     response_data = {
-        "season": data.get("season"), 
+        "season": season,
+        "source": source,
         "cache_expires": expiry_dt.isoformat(),
         "constructors": results,
-        "result_signature": new_signature}
+        "result_signature": make_signature(results),
+    }
 
     await cache.set(cache_key, response_data, expire=expire)
     return response_data
